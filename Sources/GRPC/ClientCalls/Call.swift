@@ -37,7 +37,7 @@ import protocol SwiftProtobuf.Message
 ///
 /// Callers are not able to create `Call` objects directly, rather they must be created via an
 /// object conforming to `GRPCChannel` such as `ClientConnection`.
-public class Call<Request, Response> {
+open class Call<Request, Response> {
   @usableFromInline
   internal enum State {
     /// Idle, waiting to be invoked.
@@ -61,23 +61,23 @@ public class Call<Request, Response> {
   }
 
   /// The `EventLoop` the call is being invoked on.
-  public let eventLoop: EventLoop
+  public var eventLoop: EventLoop
 
   /// The path of the RPC, usually generated from a service definition, e.g. "/echo.Echo/Get".
-  public let path: String
+  public var path: String
 
   /// The type of the RPC, e.g. unary, bidirectional streaming.
-  public let type: GRPCCallType
+  public var type: GRPCCallType
 
   /// Options used to invoke the call.
-  public let options: CallOptions
+  public var options: CallOptions
 
   /// A promise for the underlying `Channel`. We only allocate this if the user asks for
   /// the `Channel` and we haven't invoked the transport yet. It's a bit unfortunate.
   private var channelPromise: EventLoopPromise<Channel>?
 
   /// Returns a future for the underlying `Channel`.
-  internal var channel: EventLoopFuture<Channel> {
+  public var channel: EventLoopFuture<Channel> {
     if self.eventLoop.inEventLoop {
       return self._channel()
     } else {
@@ -88,7 +88,7 @@ public class Call<Request, Response> {
   }
 
   // Calls can't be constructed directly: users must make them using a `GRPCChannel`.
-  internal init(
+  public init(
     path: String,
     type: GRPCCallType,
     eventLoop: EventLoop,
@@ -157,6 +157,80 @@ public class Call<Request, Response> {
         self._cancel(promise: promise)
       }
     }
+  }
+  
+  // These helpers are for our wrapping call objects (`UnaryCall`, etc.).
+
+  /// Invokes the call and sends a single request. Sends the metadata, request and closes the
+  /// request stream.
+  /// - Parameters:
+  ///   - request: The request to send.
+  ///   - onError: A callback invoked when an error is received.
+  ///   - onResponsePart: A callback invoked for each response part received.
+  @inlinable
+  open func invokeUnaryRequest(
+    _ request: Request,
+    onError: @escaping (Error) -> Void,
+    onResponsePart: @escaping (GRPCClientResponsePart<Response>) -> Void
+  ) {
+    if self.eventLoop.inEventLoop {
+      self._invokeUnaryRequest(request: request, onError: onError, onResponsePart: onResponsePart)
+    } else {
+      self.eventLoop.execute {
+        self._invokeUnaryRequest(request: request, onError: onError, onResponsePart: onResponsePart)
+      }
+    }
+  }
+
+  /// Invokes the call for streaming requests and sends the initial call metadata. Callers can send
+  /// additional messages and end the stream by calling `send(_:promise:)`.
+  /// - Parameters:
+  ///   - onError: A callback invoked when an error is received.
+  ///   - onResponsePart: A callback invoked for each response part received.
+  @inlinable
+  internal func invokeStreamingRequests(
+    onError: @escaping (Error) -> Void,
+    onResponsePart: @escaping (GRPCClientResponsePart<Response>) -> Void
+  ) {
+    if self.eventLoop.inEventLoop {
+      self._invokeStreamingRequests(onError: onError, onResponsePart: onResponsePart)
+    } else {
+      self.eventLoop.execute {
+        self._invokeStreamingRequests(onError: onError, onResponsePart: onResponsePart)
+      }
+    }
+  }
+
+  /// On-`EventLoop` implementation of `invokeUnaryRequest(request:_:)`.
+  @usableFromInline
+  internal func _invokeUnaryRequest(
+    request: Request,
+    onError: @escaping (Error) -> Void,
+    onResponsePart: @escaping (GRPCClientResponsePart<Response>) -> Void
+  ) {
+    self.eventLoop.assertInEventLoop()
+    assert(self.type == .unary || self.type == .serverStreaming)
+
+    self._invoke(onError: onError, onResponsePart: onResponsePart)
+    self._send(.metadata(self.options.customMetadata), promise: nil)
+    self._send(
+      .message(request, .init(compress: self.isCompressionEnabled, flush: false)),
+      promise: nil
+    )
+    self._send(.end, promise: nil)
+  }
+
+  /// On-`EventLoop` implementation of `invokeStreamingRequests(_:)`.
+  @usableFromInline
+  internal func _invokeStreamingRequests(
+    onError: @escaping (Error) -> Void,
+    onResponsePart: @escaping (GRPCClientResponsePart<Response>) -> Void
+  ) {
+    self.eventLoop.assertInEventLoop()
+    assert(self.type == .clientStreaming || self.type == .bidirectionalStreaming)
+
+    self._invoke(onError: onError, onResponsePart: onResponsePart)
+    self._send(.metadata(self.options.customMetadata), promise: nil)
   }
 }
 
@@ -340,77 +414,5 @@ extension Call {
 }
 
 extension Call {
-  // These helpers are for our wrapping call objects (`UnaryCall`, etc.).
-
-  /// Invokes the call and sends a single request. Sends the metadata, request and closes the
-  /// request stream.
-  /// - Parameters:
-  ///   - request: The request to send.
-  ///   - onError: A callback invoked when an error is received.
-  ///   - onResponsePart: A callback invoked for each response part received.
-  @inlinable
-  internal func invokeUnaryRequest(
-    _ request: Request,
-    onError: @escaping (Error) -> Void,
-    onResponsePart: @escaping (GRPCClientResponsePart<Response>) -> Void
-  ) {
-    if self.eventLoop.inEventLoop {
-      self._invokeUnaryRequest(request: request, onError: onError, onResponsePart: onResponsePart)
-    } else {
-      self.eventLoop.execute {
-        self._invokeUnaryRequest(request: request, onError: onError, onResponsePart: onResponsePart)
-      }
-    }
-  }
-
-  /// Invokes the call for streaming requests and sends the initial call metadata. Callers can send
-  /// additional messages and end the stream by calling `send(_:promise:)`.
-  /// - Parameters:
-  ///   - onError: A callback invoked when an error is received.
-  ///   - onResponsePart: A callback invoked for each response part received.
-  @inlinable
-  internal func invokeStreamingRequests(
-    onError: @escaping (Error) -> Void,
-    onResponsePart: @escaping (GRPCClientResponsePart<Response>) -> Void
-  ) {
-    if self.eventLoop.inEventLoop {
-      self._invokeStreamingRequests(onError: onError, onResponsePart: onResponsePart)
-    } else {
-      self.eventLoop.execute {
-        self._invokeStreamingRequests(onError: onError, onResponsePart: onResponsePart)
-      }
-    }
-  }
-
-  /// On-`EventLoop` implementation of `invokeUnaryRequest(request:_:)`.
-  @usableFromInline
-  internal func _invokeUnaryRequest(
-    request: Request,
-    onError: @escaping (Error) -> Void,
-    onResponsePart: @escaping (GRPCClientResponsePart<Response>) -> Void
-  ) {
-    self.eventLoop.assertInEventLoop()
-    assert(self.type == .unary || self.type == .serverStreaming)
-
-    self._invoke(onError: onError, onResponsePart: onResponsePart)
-    self._send(.metadata(self.options.customMetadata), promise: nil)
-    self._send(
-      .message(request, .init(compress: self.isCompressionEnabled, flush: false)),
-      promise: nil
-    )
-    self._send(.end, promise: nil)
-  }
-
-  /// On-`EventLoop` implementation of `invokeStreamingRequests(_:)`.
-  @usableFromInline
-  internal func _invokeStreamingRequests(
-    onError: @escaping (Error) -> Void,
-    onResponsePart: @escaping (GRPCClientResponsePart<Response>) -> Void
-  ) {
-    self.eventLoop.assertInEventLoop()
-    assert(self.type == .clientStreaming || self.type == .bidirectionalStreaming)
-
-    self._invoke(onError: onError, onResponsePart: onResponsePart)
-    self._send(.metadata(self.options.customMetadata), promise: nil)
-  }
+  
 }

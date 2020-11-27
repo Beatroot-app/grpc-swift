@@ -18,8 +18,8 @@ import NIOHTTP2
 import protocol SwiftProtobuf.Message
 
 /// A `ClientTransport` factory for an RPC.
-@usableFromInline
-internal struct ClientTransportFactory<Request, Response> {
+//@usableFromInline
+public struct ClientTransportFactory<Request, Response> {
   /// The underlying transport factory.
   private var factory: Factory<Request, Response>
 
@@ -87,7 +87,7 @@ internal struct ClientTransportFactory<Request, Response> {
   /// Make a factory for 'fake' transport.
   /// - Parameter fakeResponse: The fake response stream.
   /// - Returns: A factory for making and configuring fake transport.
-  internal static func fake(
+  public static func fake(
     _ fakeResponse: _FakeResponseStream<Request, Response>?,
     on eventLoop: EventLoop
   ) -> ClientTransportFactory<Request, Response> {
